@@ -1,0 +1,46 @@
+# Unity generated folders
+/Library/
+/Temp/
+/Obj/
+/Build/
+/Builds/
+/Logs/
+/UserSettings/
+/MemoryCaptures/
+/Recordings/
+
+# Unity generated files
+*.csproj
+*.sln
+*.suo
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# Unity crash/debug output
+sysinfo.txt
+*.stackdump
+
+# Asset Store Tools
+/Assets/AssetStoreTools*
+
+# Rider / Visual Studio / VS Code
+/.idea/
+/.vs/
+/.vscode/
+*.DotSettings.user
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Codex / MCP local runtime artifacts
+/.codex/tmp/
+/.codex/logs/
