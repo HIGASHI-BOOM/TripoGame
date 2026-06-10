@@ -110,7 +110,9 @@ public class CeilingMonsterSetup : EditorWindow
         // The script auto-flips modelRoot in Awake
 
         // Ranged attack (fires bullets at the player)
-        monster.AddComponent<CeilingMonsterAttack>();
+        CeilingMonsterAttack rangedAttack = monster.AddComponent<CeilingMonsterAttack>();
+        rangedAttack.hideFlags = HideFlags.None;
+        AssignBulletPrefab(rangedAttack);
 
         // 6. Create Attack Trigger child
         GameObject attackTrigger = new GameObject("Attack_Trigger");
@@ -219,6 +221,25 @@ public class CeilingMonsterSetup : EditorWindow
     }
 
     /// <summary>
+    /// Load the bullet prefab from Resources and assign it to the CeilingMonsterAttack component.
+    /// </summary>
+    private static void AssignBulletPrefab(CeilingMonsterAttack attack)
+    {
+        string bulletPath = "Assets/Resources/PF_CeilingMonster_Bullet.prefab";
+        GameObject prefab = AssetDatabase.LoadAssetAtPath<GameObject>(bulletPath);
+        if (prefab == null)
+        {
+            Debug.LogWarning("Bullet prefab not found at " + bulletPath);
+            return;
+        }
+
+        SerializedObject so = new SerializedObject(attack);
+        so.Update();
+        so.FindProperty("bulletPrefab").objectReferenceValue = prefab;
+        so.ApplyModifiedProperties();
+    }
+
+    /// <summary>
     /// Quick-create a ceiling monster at the default ceiling height (menu item).
     /// </summary>
     [MenuItem("GameObject/Ceiling Monster", false, 10)]
@@ -273,6 +294,7 @@ public class CeilingMonsterSetup : EditorWindow
         // Ranged attack (fires bullets at the player)
         CeilingMonsterAttack rangedAttack = monster.AddComponent<CeilingMonsterAttack>();
         rangedAttack.hideFlags = HideFlags.None;
+        AssignBulletPrefab(rangedAttack);
 
         // Attack trigger
         GameObject atk = new GameObject("Attack_Trigger");

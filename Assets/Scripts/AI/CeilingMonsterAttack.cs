@@ -2,12 +2,14 @@ using UnityEngine;
 
 /// <summary>
 /// Ranged attack component for the ceiling monster.
-/// Spawns bullets that fly toward the player and explode on contact.
+/// Spawns bullets from a prefab that fly toward the player and explode on contact.
 /// Fires at a configurable cooldown while the monster is chasing and in range.
 /// </summary>
 [RequireComponent(typeof(CeilingMonsterBrain))]
 public class CeilingMonsterAttack : MonoBehaviour
 {
+    private const string BulletPrefabResourcePath = "PF_CeilingMonster_Bullet";
+
     [Header("References")]
     [Tooltip("Ceiling monster brain — reads chase state and target.")]
     [SerializeField] private CeilingMonsterBrain brain;
@@ -26,7 +28,7 @@ public class CeilingMonsterAttack : MonoBehaviour
     [SerializeField] private float fireCooldown = 2f;
 
     [Header("Bullet")]
-    [Tooltip("Bullet prefab. If empty, a default sphere bullet is created at runtime.")]
+    [Tooltip("Bullet prefab. If empty, loads from Resources/PF_CeilingMonster_Bullet.")]
     [SerializeField] private GameObject bulletPrefab;
 
     [Tooltip("Bullet travel speed in meters per second.")]
@@ -38,11 +40,20 @@ public class CeilingMonsterAttack : MonoBehaviour
     // Fire cooldown timer
     private float cooldownTimer;
     private Transform cachedTarget;
+    private GameObject loadedBulletPrefab;
 
     private void Awake()
     {
         if (brain == null)
             brain = GetComponent<CeilingMonsterBrain>();
+
+        // Load bullet prefab from Resources as fallback
+        if (bulletPrefab == null)
+        {
+            loadedBulletPrefab = Resources.Load<GameObject>(BulletPrefabResourcePath);
+            if (loadedBulletPrefab == null)
+                Debug.LogWarning("CeilingMonsterAttack: bullet prefab not assigned and not found at Resources/" + BulletPrefabResourcePath);
+        }
     }
 
     private void OnEnable()
@@ -80,79 +91,30 @@ public class CeilingMonsterAttack : MonoBehaviour
 
     private void Fire(Vector3 targetPosition)
     {
+        // Resolve prefab: Inspector assignment first, then Resources fallback
+        GameObject prefab = bulletPrefab != null ? bulletPrefab : loadedBulletPrefab;
+        if (prefab == null)
+            return;
+
         // Spawn below the monster so the bullet doesn't start inside the ceiling
         Vector3 spawnPos = muzzle != null
             ? muzzle.position
             : transform.position + Vector3.down * spawnOffsetDown;
 
-        GameObject bulletGO;
-        if (bulletPrefab != null)
-        {
-            bulletGO = Instantiate(bulletPrefab, spawnPos, Quaternion.identity);
-        }
-        else
-        {
-            bulletGO = CreateDefaultBullet(spawnPos);
-        }
+        GameObject bulletGO = Instantiate(prefab, spawnPos, Quaternion.identity);
+        bulletGO.transform.localScale = prefab.transform.lossyScale;
 
         CeilingMonsterBullet bullet = bulletGO.GetComponent<CeilingMonsterBullet>();
         if (bullet == null)
-            bullet = bulletGO.AddComponent<CeilingMonsterBullet>();
+        {
+            Destroy(bulletGO);
+            return;
+        }
 
         // Tag the bullet so it knows who fired it (avoids hitting the owner)
         bullet.SetOwner(transform);
 
         bullet.Initialize(targetPosition, bulletSpeed);
-    }
-
-    /// <summary>
-    /// Create a visible sphere bullet at runtime when no prefab is assigned.
-    /// </summary>
-    private GameObject CreateDefaultBullet(Vector3 position)
-    {
-        GameObject bullet = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-        bullet.name = "CeilingMonster_Bullet";
-        bullet.transform.position = position;
-        bullet.transform.localScale = Vector3.one * 0.35f;
-
-        // Remove the collider from CreatePrimitive — CeilingMonsterBullet adds its own
-        DestroyImmediate(bullet.GetComponent<SphereCollider>());
-
-        // Add our bullet script
-        bullet.AddComponent<CeilingMonsterBullet>();
-
-        // Set material
-        Renderer renderer = bullet.GetComponent<Renderer>();
-        if (renderer != null)
-        {
-            Material mat = new Material(Shader.Find("Universal Render Pipeline/Lit")
-                                        ?? Shader.Find("Standard"));
-            if (mat != null)
-            {
-                Color color = new Color(1f, 0.3f, 0.05f);
-                if (mat.HasProperty("_BaseColor"))
-                    mat.SetColor("_BaseColor", color);
-                else if (mat.HasProperty("_Color"))
-                    mat.SetColor("_Color", color);
-
-                if (mat.HasProperty("_EmissionColor"))
-                {
-                    mat.EnableKeyword("_EMISSION");
-                    mat.SetColor("_EmissionColor", color * 0.5f);
-                }
-
-                renderer.sharedMaterial = mat;
-            }
-        }
-
-        // Add a point light for glow effect
-        Light light = bullet.AddComponent<Light>();
-        light.type = LightType.Point;
-        light.color = new Color(1f, 0.4f, 0.1f);
-        light.intensity = 0.6f;
-        light.range = 4f;
-
-        return bullet;
     }
 
     // =======================================================================
