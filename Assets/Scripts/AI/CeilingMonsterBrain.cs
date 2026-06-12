@@ -1,51 +1,25 @@
 using UnityEngine;
 
 /// <summary>
-/// A ceiling-walking monster prototype that uses model inversion and positive gravity.
+/// A ceiling-dwelling monster that jumps between ceiling blocks.
 ///
-/// Physics approach (all forces applied in FixedUpdate):
-///   - Upward AddForce (positive gravity) keeps the monster pressed to the ceiling
-///   - A ceiling spring (critically damped) prevents Y-drift without fighting the physics engine
-///   - Horizontal velocity drives patrol / chase movement along the ceiling plane
-///   - The visual model is flipped 180� so it appears upside-down on the ceiling
+/// Priority order when the player is spotted:
+///   1. If a ceiling exists above the player AND jump is off cooldown → jump there
+///      (arcs downward first, then floats up to the new ceiling via inverted gravity).
+///   2. Otherwise → chase the player along the current ceiling block (cannot leave it).
 ///
-/// State machine: Patrol (waypoints) / Chase (follow player below).
+/// When no player is detected → idle on the current ceiling.
 /// </summary>
 [RequireComponent(typeof(Rigidbody))]
 [RequireComponent(typeof(CapsuleCollider))]
 public class CeilingMonsterBrain : MonoBehaviour
 {
-    public enum MonsterState
-    {
-        Patrol,
-        Chase
-    }
-
-    [Header("Movement")]
-    [Tooltip("Speed in meters per second while patrolling.")]
-    [SerializeField] private float patrolSpeed = 2.2f;
-
-    [Tooltip("Speed in meters per second while chasing.")]
-    [SerializeField] private float chaseSpeed = 4.2f;
-
-    [Tooltip("Horizontal acceleration (how quickly target speed is reached).")]
-    [SerializeField] private float acceleration = 18f;
-
-    [Tooltip("Rotation speed in degrees per second.")]
-    [SerializeField] private float rotationSpeed = 360f;
-
-    [Tooltip("Upward gravity strength that keeps the monster stuck to the ceiling.")]
-    [SerializeField] private float upwardGravity = 15f;
-
     [Header("Targeting")]
     [Tooltip("Tag for the player target.")]
     [SerializeField] private string targetTag = "Player";
 
     [Tooltip("Max distance for player detection.")]
     [SerializeField] private float detectionRadius = 10f;
-
-    [Tooltip("Horizontal field of view in degrees.")]
-    [SerializeField] private float fieldOfView = 130f;
 
     [Tooltip("Distance at which the monster loses the player.")]
     [SerializeField] private float loseSightRadius = 15f;
@@ -57,8 +31,8 @@ public class CeilingMonsterBrain : MonoBehaviour
     [SerializeField] private float sensingInterval = 0.15f;
 
     [Header("Ceiling")]
-    [Tooltip("Layer mask for ceiling surfaces. Must NOT include the monster's own layer.")]
-    [SerializeField] private LayerMask ceilingMask = 1;
+    [Tooltip("Layer mask for ceiling surfaces. Must NOT include the monster's own layer.\nDefault = Navigation layer (8).")]
+    [SerializeField] private LayerMask ceilingMask = 256; // 1 << 8 = Navigation
 
     [Tooltip("Layers that can block line-of-sight (walls, pillars, etc).")]
     [SerializeField] private LayerMask lineOfSightMask = 1;
@@ -75,39 +49,51 @@ public class CeilingMonsterBrain : MonoBehaviour
     [Tooltip("Max raycast distance for ceiling detection.")]
     [SerializeField] private float ceilingCheckDistance = 5f;
 
-    [Header("Patrol")]
-    [Tooltip("Waypoints to patrol between.")]
-    [SerializeField] private Transform[] patrolWaypoints;
+    [Tooltip("Upward gravity strength that keeps the monster stuck to the ceiling (inverted, +9.8 = Earth gravity reversed).")]
+    [SerializeField] private float upwardGravity = 9.8f;
 
-    [Tooltip("Wait time at each waypoint.")]
-    [SerializeField] private float patrolWaitTime = 1.25f;
+    [Header("Jump")]
+    [Tooltip("Cooldown between jumps in seconds.")]
+    [SerializeField] private float jumpCooldown = 1f;
 
-    [Tooltip("Distance considered 'arrived at waypoint'.")]
-    [SerializeField] private float patrolArrivalDistance = 0.5f;
+    [Tooltip("Max raycast distance when checking for a ceiling above the player (can be larger than ceilingCheckDistance for tall rooms).")]
+    [SerializeField] private float jumpCheckDistance = 20f;
 
-    [Header("Visuals")]
-    [Tooltip("Root of the visual model. Flipped 180� on Z. Auto-detects child 'Capsule_Visual'.")]
-    [SerializeField] private Transform modelRoot;
+    [Tooltip("How far the monster dips downward during the jump arc (meters).")]
+    [SerializeField] private float jumpDipHeight = 3f;
+
+    [Header("Chase")]
+    [Tooltip("Movement speed when chasing along the current ceiling (cannot leave the block).")]
+    [SerializeField] private float chaseSpeed = 4.2f;
+
+    [Tooltip("Rotation speed in degrees per second.")]
+    [SerializeField] private float rotationSpeed = 360f;
 
     // Components
     private Rigidbody rb;
     private CapsuleCollider capsule;
 
+    // State machine
+    private enum MonsterAction { Idle, Chase, Jumping }
+    private MonsterAction currentAction = MonsterAction.Idle;
+
     // State
-    private MonsterState currentState = MonsterState.Patrol;
     private Transform currentTarget;
-    private Vector3 lastTargetPosition;
-    private int patrolIndex;
-    private float waitTimer;
     private float sensingTimer;
-    private float chaseRepathTimer;
+    private float jumpCooldownTimer;
     private Vector3 moveDestination;
+
+    // Jump state (used while Jumping)
+    private Vector3 jumpTargetPosition;
+    private float jumpTargetCeilingY;
+    private Vector3 jumpStartPosition;
+    private float jumpTimer;
+    private float jumpDuration;
 
     // Ceiling values
     private float ceilingSurfaceY;
     private float capsuleTopOffset;
 
-    public MonsterState CurrentState => currentState;
     public Transform CurrentTarget => currentTarget;
 
     // =======================================================================
@@ -118,6 +104,10 @@ public class CeilingMonsterBrain : MonoBehaviour
     {
         rb = GetComponent<Rigidbody>();
         capsule = GetComponent<CapsuleCollider>();
+
+        // Ensure Navigation layer (8) is always included in the ceiling mask,
+        // even if the Inspector value was set before this code change.
+        ceilingMask |= 1 << 8;
 
         // Physics setup: we control gravity manually
         rb.useGravity = false;
@@ -138,60 +128,69 @@ public class CeilingMonsterBrain : MonoBehaviour
 
         // Precalculate capsule top offset from transform origin
         capsuleTopOffset = (capsule.center.y + capsule.height * 0.5f) * transform.localScale.y;
-
-        // Flip the visual model 180 deg around Z so it appears upside-down.
-        if (modelRoot == null)
-        {
-            Transform child = transform.Find("Capsule_Visual");
-            if (child != null)
-                modelRoot = child;
-        }
-        if (modelRoot != null)
-            modelRoot.localRotation = Quaternion.Euler(0f, 0f, 180f);
     }
 
     private void Start()
     {
         rb.WakeUp();
         SnapToCeiling();
-
-        if (patrolWaypoints != null && patrolWaypoints.Length > 0)
-        {
-            moveDestination = patrolWaypoints[0].position;
-            moveDestination.y = transform.position.y;
-        }
-        else
-        {
-            moveDestination = transform.position;
-        }
+        moveDestination = transform.position;
+        Debug.Log($"[CeilingMonsterBrain] Started. ceilingMask={ceilingMask.value} (layers in mask: {string.Join(", ", GetLayerNames(ceilingMask))}), ceilingCheckDistance={ceilingCheckDistance}");
     }
 
     private void Update()
     {
         UpdateSensing();
-
-        switch (currentState)
-        {
-            case MonsterState.Patrol:
-                TickPatrol();
-                break;
-            case MonsterState.Chase:
-                TickChase();
-                break;
-        }
     }
 
     private void FixedUpdate()
     {
-        // 1) Upward gravity — constant pull toward the ceiling
+        if (currentAction == MonsterAction.Jumping)
+        {
+            // ── Controlled jump arc ──────────────────────────────────────
+            // During the jump we drive position directly along a calculated
+            // parabola.  No gravity/spring — only MovePosition.
+            jumpTimer += Time.fixedDeltaTime;
+            float t = Mathf.Clamp01(jumpTimer / jumpDuration);
+
+            // Horizontal: simple lerp from start to target
+            Vector3 pos = Vector3.Lerp(jumpStartPosition, jumpTargetPosition, t);
+
+            // Vertical arc: dips down in the middle, then rises back up.
+            // The factor -4*t*(1-t) creates a parabola that peaks at t=0.5
+            // with value -dipHeight at the midpoint.
+            pos.y += -4f * jumpDipHeight * t * (1f - t);
+
+            rb.MovePosition(pos);
+            rb.linearVelocity = Vector3.zero;
+
+            // Rotate toward the target direction (looking along the arc)
+            Vector3 arcDir = jumpTargetPosition - jumpStartPosition;
+            arcDir.y = 0f;
+            if (arcDir.sqrMagnitude > 0.1f)
+            {
+                Quaternion lookRot = Quaternion.LookRotation(arcDir.normalized, Vector3.down);
+                transform.rotation = Quaternion.RotateTowards(
+                    transform.rotation, lookRot, rotationSpeed * Time.fixedDeltaTime);
+            }
+
+            // Land when the arc completes
+            if (t >= 1f)
+                LandOnCeiling();
+
+            return;
+        }
+
+        // ── Normal state (Idle / Chase) ─────────────────────────────────
+        // Upward gravity — constant pull toward the ceiling
         Vector3 gravityForce = Vector3.up * (upwardGravity * rb.mass);
         rb.AddForce(gravityForce, ForceMode.Force);
 
-        // 2) Ceiling spring correction — keeps Y at the correct ceiling offset
+        // Ceiling spring correction — keeps Y at the correct ceiling offset
         ApplyCeilingSpring();
 
-        // 3) Horizontal movement along the ceiling plane
-        ApplyMovement();
+        // Chase movement along the ceiling (constrained to block bounds)
+        ApplyConstrainedMovement();
     }
 
     // =======================================================================
@@ -200,7 +199,6 @@ public class CeilingMonsterBrain : MonoBehaviour
 
     /// <summary>
     /// Immediately snap the monster into position below the ceiling surface.
-    /// Called once in Start().
     /// </summary>
     private void SnapToCeiling()
     {
@@ -215,7 +213,6 @@ public class CeilingMonsterBrain : MonoBehaviour
 
     /// <summary>
     /// Soft spring that keeps the monster near the target Y below the ceiling.
-    /// Stiffness is low enough that grid-bar collisions don't block horizontal movement.
     /// F = -k * displacement - d * velocity
     /// </summary>
     private void ApplyCeilingSpring()
@@ -228,8 +225,6 @@ public class CeilingMonsterBrain : MonoBehaviour
         float displacement = transform.position.y - targetY;
         float velocityY = rb.linearVelocity.y;
 
-        // Dead zone: if displacement is very small, don't apply spring force
-        // This stops the spring from fighting the upward gravity unnecessarily.
         if (Mathf.Abs(displacement) < 0.005f && Mathf.Abs(velocityY) < 0.05f)
             return;
 
@@ -237,20 +232,13 @@ public class CeilingMonsterBrain : MonoBehaviour
         rb.AddForce(Vector3.up * springAccel, ForceMode.Acceleration);
     }
 
-    /// <summary>
-    /// Target Y position for the monster's transform origin.
-    /// Positions the monster so its capsule top is below the ceiling surface
-    /// by the clearance amount.
-    /// </summary>
     private float CeilingTargetY()
     {
         return ceilingSurfaceY - capsuleTopOffset - ceilingClearance;
     }
 
     /// <summary>
-    /// Raycast upward to find the ceiling surface.
-    /// The ray starts just below the top of the capsule so it does not originate
-    /// inside the ceiling collider.
+    /// Raycast upward from the monster's position to find the ceiling surface.
     /// </summary>
     private bool FindCeilingSurface(out float hitY)
     {
@@ -282,25 +270,16 @@ public class CeilingMonsterBrain : MonoBehaviour
         if (sensed != null)
         {
             currentTarget = sensed;
-            lastTargetPosition = sensed.position;
-
-            if (currentState != MonsterState.Chase)
-                EnterChase();
+            TryJumpOrChase();
             return;
         }
 
-        if (currentTarget == null || currentState != MonsterState.Chase)
-            return;
-
-        float dist = Vector3.Distance(transform.position, currentTarget.position);
-        if (dist > loseSightRadius)
+        // Still have a target but can't see them — check distance
+        if (currentTarget != null)
         {
-            currentTarget = null;
-            EnterPatrol();
-        }
-        else
-        {
-            lastTargetPosition = currentTarget.position;
+            float dist = Vector3.Distance(transform.position, currentTarget.position);
+            if (dist > loseSightRadius)
+                currentTarget = null;
         }
     }
 
@@ -321,7 +300,6 @@ public class CeilingMonsterBrain : MonoBehaviour
     {
         Vector3 toTarget = candidate.position - transform.position;
 
-        // Range check
         if (toTarget.sqrMagnitude > detectionRadius * detectionRadius)
             return false;
 
@@ -339,139 +317,183 @@ public class CeilingMonsterBrain : MonoBehaviour
     }
 
     // =======================================================================
-    // Patrol State
-    // =======================================================================
-
-    private void EnterPatrol()
-    {
-        currentState = MonsterState.Patrol;
-        waitTimer = 0f;
-        PickNextPatrolDestination();
-    }
-
-    private void TickPatrol()
-    {
-        if (HasArrived())
-        {
-            waitTimer += Time.deltaTime;
-            if (waitTimer >= patrolWaitTime)
-            {
-                waitTimer = 0f;
-                PickNextPatrolDestination();
-            }
-        }
-    }
-
-    private void PickNextPatrolDestination()
-    {
-        if (patrolWaypoints != null && patrolWaypoints.Length > 0)
-        {
-            Transform wp = patrolWaypoints[patrolIndex % patrolWaypoints.Length];
-            patrolIndex++;
-            if (wp != null)
-            {
-                Vector3 dest = wp.position;
-                dest.y = transform.position.y;
-                moveDestination = dest;
-                return;
-            }
-        }
-
-        moveDestination = transform.position;
-    }
-
-    // =======================================================================
-    // Chase State
-    // =======================================================================
-
-    private void EnterChase()
-    {
-        currentState = MonsterState.Chase;
-        chaseRepathTimer = 0f;
-
-        if (currentTarget != null)
-            lastTargetPosition = currentTarget.position;
-
-        UpdateChaseDestination();
-    }
-
-    private void TickChase()
-    {
-        if (currentTarget == null)
-        {
-            EnterPatrol();
-            return;
-        }
-
-        chaseRepathTimer -= Time.deltaTime;
-        if (chaseRepathTimer <= 0f)
-        {
-            chaseRepathTimer = Mathf.Max(0.02f, sensingInterval);
-            UpdateChaseDestination();
-        }
-    }
-
-    private void UpdateChaseDestination()
-    {
-        if (currentTarget != null)
-            lastTargetPosition = currentTarget.position;
-
-        Vector3 dest = lastTargetPosition;
-        dest.y = transform.position.y;
-
-        // If the player is directly below (destination ≈ monster's position),
-        // orbit around them instead of stopping.
-        Vector3 toDest = dest - transform.position;
-        toDest.y = 0f;
-        if (toDest.sqrMagnitude < 2.25f) // within 1.5m
-        {
-            // Perpendicular offset: cross product of forward and up
-            Vector3 orbit = Vector3.Cross(transform.forward, Vector3.up).normalized * 3f;
-            dest += orbit;
-        }
-
-        moveDestination = dest;
-    }
-
-    // =======================================================================
-    // Movement
+    // Jump
     // =======================================================================
 
     /// <summary>
-    /// Apply horizontal velocity toward moveDestination (XZ only).
-    /// Y velocity is left untouched — the ceiling spring handles Y.
-    /// Called from FixedUpdate.
+    /// Decide: jump to a ceiling above the player, or chase along the current one.
+    ///   1. Ceiling above player + cooldown ready → jump (arc down, float up).
+    ///   2. Otherwise → chase along the current ceiling block (can't leave it).
     /// </summary>
-    private void ApplyMovement()
+    private void TryJumpOrChase()
     {
+        if (currentTarget == null)
+            return;
+
+        // Handle cooldown timer regardless
+        if (jumpCooldownTimer > 0f)
+        {
+            jumpCooldownTimer -= Time.deltaTime;
+            SetChaseDestination();
+            return;
+        }
+
+        Vector3 playerPos = currentTarget.position;
+
+        // Priority 1: jump to a ceiling above the player
+        if (FindCeilingAtPosition(playerPos, out float ceilingY))
+        {
+            StartJumpToCeiling(playerPos, ceilingY);
+            jumpCooldownTimer = jumpCooldown;
+            return;
+        }
+
+        // Priority 2: chase along the current ceiling
+        SetChaseDestination();
+    }
+
+    /// <summary>
+    /// Point moveDestination at the player, projected onto the monster's ceiling plane.
+    /// </summary>
+    private void SetChaseDestination()
+    {
+        moveDestination = currentTarget.position;
+        moveDestination.y = transform.position.y;
+    }
+
+    /// <summary>
+    /// Start a controlled jump arc toward the ceiling above the player.
+    /// The monster follows a pre-calculated parabola:
+    ///   - Drops downward first (visible "jump off the ceiling")
+    ///   - Rises back up to the target ceiling
+    ///   - Lands and resumes chasing
+    /// </summary>
+    private void StartJumpToCeiling(Vector3 position, float ceilingY)
+    {
+        jumpTargetCeilingY = ceilingY;
+
+        // Target position: at the player's XZ, at the correct Y below the target ceiling
+        jumpTargetPosition = position;
+        jumpTargetPosition.y = ceilingY - capsuleTopOffset - ceilingClearance;
+
+        jumpStartPosition = transform.position;
+
+        // Jump duration scales with horizontal distance (at chase speed)
+        float horizontalDist = Vector3.Distance(
+            new Vector3(jumpStartPosition.x, 0f, jumpStartPosition.z),
+            new Vector3(jumpTargetPosition.x, 0f, jumpTargetPosition.z));
+        jumpDuration = Mathf.Max(0.4f, horizontalDist / chaseSpeed);
+
+        jumpTimer = 0f;
+        currentAction = MonsterAction.Jumping;
+
+        // Clear any residual velocity so physics doesn't fight the arc
+        rb.linearVelocity = Vector3.zero;
+
+        Debug.Log($"[CeilingMonsterBrain] Jumping from {jumpStartPosition} → {jumpTargetPosition} " +
+                  $"(dist={horizontalDist:F1}m, duration={jumpDuration:F2}s, dip={jumpDipHeight:F1}m)");
+    }
+
+    /// <summary>
+    /// (Unused — landing is handled by the timer in FixedUpdate.)
+    /// Kept as a safe no-op in case external callers exist.
+    /// </summary>
+    private void CheckJumpLanding() { }
+
+    /// <summary>
+    /// Snap the monster onto the target ceiling and return to chase state.
+    /// </summary>
+    private void LandOnCeiling()
+    {
+        ceilingSurfaceY = jumpTargetCeilingY;
+
+        // Snap to the correct Y for this ceiling
+        Vector3 pos = transform.position;
+        pos.y = CeilingTargetY();
+        rb.MovePosition(pos);
+        rb.linearVelocity = Vector3.zero;
+
+        currentAction = MonsterAction.Chase;
+        moveDestination = jumpTargetPosition;
+        moveDestination.y = pos.y;
+
+        Debug.Log($"[CeilingMonsterBrain] Landed on ceiling at Y={ceilingSurfaceY}");
+    }
+
+    /// <summary>
+    /// Raycast upward from an arbitrary world position to find the ceiling surface Y.
+    /// Uses jumpCheckDistance (longer) since ceilings can be far above the player.
+    /// </summary>
+    private bool FindCeilingAtPosition(Vector3 position, out float hitY)
+    {
+        hitY = 0f;
+        Vector3 rayOrigin = position + Vector3.up * (capsuleTopOffset - 0.1f);
+        return Physics.Raycast(rayOrigin, Vector3.up, out RaycastHit hit,
+                jumpCheckDistance, ceilingMask, QueryTriggerInteraction.Ignore)
+            ? (hitY = hit.point.y) == hit.point.y
+            : false;
+    }
+
+    /// <summary>
+    /// Move horizontally toward moveDestination, but only if the target XZ position
+    /// still has a ceiling above it (checked at short range = ceilingCheckDistance).
+    /// If the ceiling ends, the monster stops at the edge.
+    /// </summary>
+    private void ApplyConstrainedMovement()
+    {
+        if (currentTarget == null)
+            return;
+
         Vector3 toDest = moveDestination - transform.position;
         toDest.y = 0f;
 
-        float speed = currentState == MonsterState.Chase ? chaseSpeed : patrolSpeed;
-        Vector3 desired = Vector3.zero;
+        if (toDest.sqrMagnitude < 0.1f)
+            return;
 
-        if (toDest.sqrMagnitude > 0.01f)
+        float maxStep = chaseSpeed * Time.fixedDeltaTime;
+        Vector3 step = toDest.normalized * Mathf.Min(maxStep, toDest.magnitude);
+        Vector3 newPos = rb.position + new Vector3(step.x, 0f, step.z);
+
+        // Use SHORT range (ceilingCheckDistance) for boundary detection —
+        // we only want to know if there's a ceiling right above the new position,
+        // not a ceiling way up high that the ray passes through a gap to reach.
+        if (CeilingExistsAt(newPos))
         {
-            desired = toDest.normalized * speed;
-
-            Quaternion lookRot = Quaternion.LookRotation(toDest.normalized, Vector3.down);
-            transform.rotation = Quaternion.RotateTowards(
-                transform.rotation, lookRot, rotationSpeed * Time.deltaTime);
+            rb.MovePosition(newPos);
         }
+        // else: edge of ceiling — stop (can't leave the block)
 
-        // Set horizontal velocity, preserve Y (ceiling spring handles it)
-        Vector3 vel = rb.linearVelocity;
-        vel.x = Mathf.MoveTowards(vel.x, desired.x, acceleration * Time.fixedDeltaTime);
-        vel.z = Mathf.MoveTowards(vel.z, desired.z, acceleration * Time.fixedDeltaTime);
-        rb.linearVelocity = vel;
+        // Rotate to face movement direction
+        Vector3 moveDir = toDest.normalized;
+        Quaternion lookRot = Quaternion.LookRotation(moveDir, Vector3.down);
+        transform.rotation = Quaternion.RotateTowards(
+            transform.rotation, lookRot, rotationSpeed * Time.fixedDeltaTime);
     }
 
-    private bool HasArrived()
+    /// <summary>
+    /// Quick check: is there a ceiling within ceilingCheckDistance above this position?
+    /// Used for movement boundary detection (short range).
+    /// </summary>
+    private bool CeilingExistsAt(Vector3 position)
     {
-        Vector3 a = transform.position;
-        Vector3 b = moveDestination;
-        a.y = b.y = 0f;
-        return Vector3.Distance(a, b) <= patrolArrivalDistance;
+        Vector3 rayOrigin = position + Vector3.up * (capsuleTopOffset - 0.1f);
+        return Physics.Raycast(rayOrigin, Vector3.up, out _,
+            ceilingCheckDistance, ceilingMask, QueryTriggerInteraction.Ignore);
+    }
+
+    // =======================================================================
+    // Debug
+    // =======================================================================
+
+    private string GetLayerNames(LayerMask mask)
+    {
+        System.Collections.Generic.List<string> names = new System.Collections.Generic.List<string>();
+        for (int i = 0; i < 32; i++)
+        {
+            if ((mask.value & (1 << i)) != 0)
+                names.Add(UnityEngine.LayerMask.LayerToName(i));
+        }
+        return names.Count > 0 ? string.Join(", ", names) : "(none)";
     }
 
     // =======================================================================
@@ -486,19 +508,6 @@ public class CeilingMonsterBrain : MonoBehaviour
         Gizmos.color = new Color(1f, 0.2f, 0.1f, 0.25f);
         Gizmos.DrawWireSphere(transform.position, loseSightRadius);
 
-        if (patrolWaypoints != null)
-        {
-            Gizmos.color = Color.green;
-            for (int i = 0; i < patrolWaypoints.Length; i++)
-            {
-                if (patrolWaypoints[i] == null) continue;
-                Gizmos.DrawWireSphere(patrolWaypoints[i].position, 0.25f);
-                Transform next = patrolWaypoints[(i + 1) % patrolWaypoints.Length];
-                if (next != null)
-                    Gizmos.DrawLine(patrolWaypoints[i].position, next.position);
-            }
-        }
-
         // Ceiling detection ray
         float topOff = capsule != null
             ? (capsule.center.y + capsule.height * 0.5f) * transform.localScale.y
@@ -506,10 +515,6 @@ public class CeilingMonsterBrain : MonoBehaviour
         Vector3 origin = transform.position + Vector3.up * (topOff - 0.1f);
         Gizmos.color = Color.cyan;
         Gizmos.DrawRay(origin, Vector3.up * ceilingCheckDistance);
-
-        Gizmos.color = currentState == MonsterState.Chase ? Color.red : Color.blue;
-        Gizmos.DrawWireSphere(moveDestination, 0.3f);
-        Gizmos.DrawLine(transform.position, moveDestination);
     }
 
     // =======================================================================
@@ -518,20 +523,18 @@ public class CeilingMonsterBrain : MonoBehaviour
 
     private void OnValidate()
     {
-        patrolSpeed = Mathf.Max(0.1f, patrolSpeed);
-        chaseSpeed = Mathf.Max(0.1f, chaseSpeed);
-        acceleration = Mathf.Max(0.1f, acceleration);
-        rotationSpeed = Mathf.Max(1f, rotationSpeed);
-        upwardGravity = Mathf.Max(0.1f, upwardGravity);
         detectionRadius = Mathf.Max(0.1f, detectionRadius);
-        fieldOfView = Mathf.Clamp(fieldOfView, 1f, 360f);
         loseSightRadius = Mathf.Max(detectionRadius, loseSightRadius);
         sensingInterval = Mathf.Max(0.02f, sensingInterval);
         ceilingClearance = Mathf.Max(0f, ceilingClearance);
         ceilingSpringStiffness = Mathf.Max(0f, ceilingSpringStiffness);
         ceilingSpringDamping = Mathf.Max(0f, ceilingSpringDamping);
         ceilingCheckDistance = Mathf.Max(0.5f, ceilingCheckDistance);
-        patrolWaitTime = Mathf.Max(0f, patrolWaitTime);
-        patrolArrivalDistance = Mathf.Max(0.05f, patrolArrivalDistance);
+        upwardGravity = Mathf.Max(0.1f, upwardGravity);
+        jumpCooldown = Mathf.Max(0f, jumpCooldown);
+        jumpCheckDistance = Mathf.Max(1f, jumpCheckDistance);
+        jumpDipHeight = Mathf.Max(0.1f, jumpDipHeight);
+        chaseSpeed = Mathf.Max(0.1f, chaseSpeed);
+        rotationSpeed = Mathf.Max(1f, rotationSpeed);
     }
 }

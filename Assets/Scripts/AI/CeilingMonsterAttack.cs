@@ -63,10 +63,8 @@ public class CeilingMonsterAttack : MonoBehaviour
 
     private void Update()
     {
-        // Only fire while chasing a target
-        if (brain.CurrentState != CeilingMonsterBrain.MonsterState.Chase)
-            return;
-
+        // Fire whenever we have a target in range
+        // (the brain manages detection — it sets CurrentTarget when the player is spotted)
         Transform target = brain.CurrentTarget;
         if (target == null)
             return;
