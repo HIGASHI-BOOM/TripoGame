@@ -7,16 +7,13 @@ using System.IO;
 ///
 /// Usage: Tools > Ceiling Monster Setup
 /// This creates the ceiling monster prefab, places an instance in the current
-/// scene at the ceiling, and optionally creates patrol waypoints.
+/// scene at the ceiling, and configures the ceiling-jump behavior.
 /// </summary>
 public class CeilingMonsterSetup : EditorWindow
 {
     private float ceilingHeight = 11.97f;
     private string prefabName = "PF_CeilingMonster_Capsule";
-    private int waypointCount = 4;
-    private float waypointRadius = 5f;
     private string targetTag = "Player";
-    private bool createWaypoints = true;
 
     [MenuItem("Tools/Ceiling Monster Setup")]
     private static void ShowWindow()
@@ -34,15 +31,6 @@ public class CeilingMonsterSetup : EditorWindow
         ceilingHeight = EditorGUILayout.FloatField("Ceiling Height (Y)", ceilingHeight);
         prefabName = EditorGUILayout.TextField("Prefab Name", prefabName);
         targetTag = EditorGUILayout.TextField("Target Tag", targetTag);
-        createWaypoints = EditorGUILayout.Toggle("Create Patrol Waypoints", createWaypoints);
-
-        if (createWaypoints)
-        {
-            EditorGUI.indentLevel++;
-            waypointCount = EditorGUILayout.IntField("Waypoint Count", Mathf.Max(2, waypointCount));
-            waypointRadius = EditorGUILayout.FloatField("Waypoint Radius", waypointRadius);
-            EditorGUI.indentLevel--;
-        }
 
         EditorGUILayout.Space();
 
@@ -106,9 +94,6 @@ public class CeilingMonsterSetup : EditorWindow
         CeilingMonsterBrain brain = monster.AddComponent<CeilingMonsterBrain>();
         brain.hideFlags = HideFlags.None;
 
-        // Set modelRoot to the visual child so it gets flipped
-        // The script auto-flips modelRoot in Awake
-
         // Ranged attack (fires bullets at the player)
         CeilingMonsterAttack rangedAttack = monster.AddComponent<CeilingMonsterAttack>();
         rangedAttack.hideFlags = HideFlags.None;
@@ -139,49 +124,7 @@ public class CeilingMonsterSetup : EditorWindow
         pos.y = ceilingHeight - (capsule.height * 0.5f);
         monster.transform.position = pos;
 
-        // 8. Create patrol waypoints if requested
-        Transform waypointParent = null;
-        if (createWaypoints)
-        {
-            GameObject wpParent = new GameObject("CeilingMonster_Waypoints");
-            Undo.RegisterCreatedObjectUndo(wpParent, "Create Waypoints");
-            waypointParent = wpParent.transform;
-            waypointParent.position = monster.transform.position;
-
-            for (int i = 0; i < waypointCount; i++)
-            {
-                float angle = (float)i / waypointCount * 360f * Mathf.Deg2Rad;
-                Vector3 wpPos = new Vector3(
-                    Mathf.Cos(angle) * waypointRadius,
-                    0f,
-                    Mathf.Sin(angle) * waypointRadius
-                );
-
-                GameObject wp = new GameObject($"Waypoint_{i + 1}");
-                Undo.RegisterCreatedObjectUndo(wp, "Create Waypoint");
-                wp.transform.SetParent(waypointParent);
-                wp.transform.position = monster.transform.position + wpPos;
-
-                // Visual indicator for waypoints
-                var wpRenderer = wp.AddComponent<SphereCollider>();
-                wpRenderer.isTrigger = true;
-                wpRenderer.radius = 0.3f;
-            }
-
-            // Assign waypoints to brain via SerializedObject (fields are [SerializeField] private)
-            SerializedObject brainSO = new SerializedObject(brain);
-            brainSO.Update();
-            SerializedProperty wpArray = brainSO.FindProperty("patrolWaypoints");
-            wpArray.ClearArray();
-            wpArray.arraySize = waypointCount;
-            for (int i = 0; i < waypointCount; i++)
-            {
-                wpArray.GetArrayElementAtIndex(i).objectReferenceValue = waypointParent.GetChild(i);
-            }
-            brainSO.ApplyModifiedProperties();
-        }
-
-        // 9. Save as prefab
+        // 8. Save as prefab
         string prefabPath = $"Assets/Prefabs/AI/{prefabName}.prefab";
         EnsureDirectoryExists("Assets/Prefabs/AI");
 
@@ -203,7 +146,7 @@ public class CeilingMonsterSetup : EditorWindow
             Debug.Log($"Ceiling monster prefab created at: {prefabPath}");
         }
 
-        // 10. Select the monster in the hierarchy
+        // 9. Select the monster in the hierarchy
         Selection.activeGameObject = monster;
 
         Debug.Log("Ceiling monster created successfully at ceiling height!");

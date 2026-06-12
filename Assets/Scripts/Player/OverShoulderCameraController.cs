@@ -28,6 +28,10 @@ public class OverShoulderCameraController : MonoBehaviour
     [Tooltip("When enabled, horizontal mouse or right-stick look rotates the target with the camera. Ignored for the player controller, which faces movement direction.")]
     [SerializeField] private bool rotateTargetWithCameraYaw = false;
 
+    [Header("Lens")]
+    [Tooltip("Camera vertical field of view in degrees. Higher values show more of the scene but add stronger perspective distortion.")]
+    [SerializeField] private float cameraFieldOfView = 58f;
+
     [Header("Input")]
     [Tooltip("Mouse look sensitivity in degrees per pixel. Lower this if the crosshair feels too twitchy.")]
     [SerializeField] private float mouseSensitivity = 0.075f;
@@ -83,8 +87,7 @@ public class OverShoulderCameraController : MonoBehaviour
     private void Awake()
     {
         controlledCamera = GetComponent<Camera>();
-        controlledCamera.orthographic = false;
-        controlledCamera.fieldOfView = 58f;
+        ApplyCameraLens();
         yaw = transform.eulerAngles.y;
     }
 
@@ -203,5 +206,42 @@ public class OverShoulderCameraController : MonoBehaviour
     {
         Cursor.lockState = shouldLock ? CursorLockMode.Locked : CursorLockMode.None;
         Cursor.visible = !shouldLock;
+    }
+
+    private void ApplyCameraLens()
+    {
+        if (controlledCamera == null)
+        {
+            controlledCamera = GetComponent<Camera>();
+        }
+
+        if (controlledCamera == null)
+        {
+            return;
+        }
+
+        controlledCamera.orthographic = false;
+        controlledCamera.fieldOfView = cameraFieldOfView;
+    }
+
+    private void OnValidate()
+    {
+        targetHeight = Mathf.Max(0f, targetHeight);
+        followDistance = Mathf.Max(0.1f, followDistance);
+        cameraFieldOfView = Mathf.Clamp(cameraFieldOfView, 1f, 179f);
+        aimConvergenceDistance = Mathf.Max(0.1f, aimConvergenceDistance);
+        mouseSensitivity = Mathf.Max(0f, mouseSensitivity);
+        gamepadSensitivity = Mathf.Max(0f, gamepadSensitivity);
+        lookSmoothTime = Mathf.Max(0f, lookSmoothTime);
+        if (maxPitch < minPitch)
+        {
+            maxPitch = minPitch;
+        }
+        positionSmoothTime = Mathf.Max(0f, positionSmoothTime);
+        collisionRadius = Mathf.Max(0f, collisionRadius);
+        collisionBuffer = Mathf.Max(0f, collisionBuffer);
+        minimumCollisionDistance = Mathf.Max(0.01f, minimumCollisionDistance);
+
+        ApplyCameraLens();
     }
 }

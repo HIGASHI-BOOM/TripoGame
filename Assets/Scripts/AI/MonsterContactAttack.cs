@@ -30,6 +30,9 @@ public class MonsterContactAttack : MonoBehaviour
     [Tooltip("Animator trigger parameter fired when the monster hits the player.")]
     [SerializeField] private string attackTriggerParameter = "Attack";
 
+    [Tooltip("Optional ceiling monster brain. When assigned, contact attacks are disabled while the monster is jumping.")]
+    [SerializeField] private CeilingMonsterBrain ceilingMonsterBrain;
+
     [Tooltip("When enabled, successful contact attacks count toward the game fail condition.")]
     [SerializeField] private bool reportHitToGameFlow = true;
 
@@ -61,6 +64,11 @@ public class MonsterContactAttack : MonoBehaviour
         if (animator == null && transform.root != null)
         {
             animator = transform.root.GetComponentInChildren<Animator>(true);
+        }
+
+        if (ceilingMonsterBrain == null)
+        {
+            ceilingMonsterBrain = GetComponentInParent<CeilingMonsterBrain>();
         }
 
         attackTriggerHash = Animator.StringToHash(attackTriggerParameter);
@@ -101,6 +109,11 @@ public class MonsterContactAttack : MonoBehaviour
             return false;
         }
 
+        if (ceilingMonsterBrain != null && ceilingMonsterBrain.IsJumping)
+        {
+            return false;
+        }
+
         if (Time.time < nextAttackTime)
         {
             return false;
@@ -114,6 +127,12 @@ public class MonsterContactAttack : MonoBehaviour
 
         Vector3 sourcePosition = knockbackSource != null ? knockbackSource.position : transform.position;
         player.ApplyLaunch(sourcePosition, knockbackSpeed, knockUpSpeed);
+        if (ceilingMonsterBrain != null)
+        {
+            ceilingMonsterBrain.FaceTargetImmediately(player.transform.position);
+            ceilingMonsterBrain.BeginAttackMoveLock();
+        }
+
         if (animator != null)
         {
             animator.SetTrigger(attackTriggerHash);

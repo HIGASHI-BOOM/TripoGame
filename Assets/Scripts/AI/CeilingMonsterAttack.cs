@@ -17,6 +17,12 @@ public class CeilingMonsterAttack : MonoBehaviour
     [Tooltip("Optional muzzle transform where bullets spawn. If empty, bullets spawn below the monster.")]
     [SerializeField] private Transform muzzle;
 
+    [Tooltip("Animator on the visual model. If empty, the first child Animator is used.")]
+    [SerializeField] private Animator animator;
+
+    [Tooltip("Trigger parameter fired when the monster shoots.")]
+    [SerializeField] private string attackTriggerParameter = "Attack";
+
     [Header("Firing")]
     [Tooltip("Max distance to the player for the monster to open fire.")]
     [SerializeField] private float fireRange = 15f;
@@ -41,11 +47,17 @@ public class CeilingMonsterAttack : MonoBehaviour
     private float cooldownTimer;
     private Transform cachedTarget;
     private GameObject loadedBulletPrefab;
+    private int attackTriggerHash;
 
     private void Awake()
     {
         if (brain == null)
             brain = GetComponent<CeilingMonsterBrain>();
+
+        if (animator == null)
+            animator = GetComponentInChildren<Animator>();
+
+        attackTriggerHash = Animator.StringToHash(attackTriggerParameter);
 
         // Load bullet prefab from Resources as fallback
         if (bulletPrefab == null)
@@ -65,6 +77,9 @@ public class CeilingMonsterAttack : MonoBehaviour
     {
         // Fire whenever we have a target in range
         // (the brain manages detection — it sets CurrentTarget when the player is spotted)
+        if (brain.IsJumping)
+            return;
+
         Transform target = brain.CurrentTarget;
         if (target == null)
             return;
@@ -111,6 +126,12 @@ public class CeilingMonsterAttack : MonoBehaviour
 
         // Tag the bullet so it knows who fired it (avoids hitting the owner)
         bullet.SetOwner(transform);
+
+        brain.FaceTargetImmediately(targetPosition);
+        brain.BeginAttackMoveLock();
+
+        if (animator != null)
+            animator.SetTrigger(attackTriggerHash);
 
         bullet.Initialize(targetPosition, bulletSpeed);
     }
